@@ -598,28 +598,63 @@ async def handle_tool_call(params: Dict) -> Dict:
 
     elif tool_name == "capture_single_frame":
         window_name = arguments.get("window_name")
-        await capture_engine.start_capture(window_name=window_name, fps=1)
-        await asyncio.sleep(0.5)
-        frame = await capture_engine.get_frame()
-        await capture_engine.stop_capture()
 
-        if frame:
-            frame_b64 = base64.b64encode(frame.data).decode('utf-8')
-            return {
-                "content": [
-                    {
-                        "type": "image",
-                        "data": frame_b64,
-                        "mimeType": "image/jpeg"
-                    }
-                ]
-            }
-        else:
+        try:
+            # 启动捕获引擎
+            success = await capture_engine.start_capture(window_name=window_name, fps=1)
+            if not success:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Failed to start capture for window: {window_name or 'screen'}"
+                        }
+                    ],
+                    "isError": True
+                }
+
+            # 重试获取帧，最多尝试 3 秒（每次等待 0.1 秒）
+            frame = None
+            max_retries = 30
+            for attempt in range(max_retries):
+                await asyncio.sleep(0.1)
+                frame = await capture_engine.get_frame()
+                if frame:
+                    break
+
+            # 停止捕获
+            await capture_engine.stop_capture()
+
+            if frame:
+                # 使用 MCP 原生 image 类型
+                frame_b64 = base64.b64encode(frame.data).decode('utf-8')
+                return {
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": frame_b64,
+                            "mimeType": "image/jpeg"
+                        }
+                    ]
+                }
+            else:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Timeout: No frame captured after {max_retries * 0.1}s"
+                        }
+                    ],
+                    "isError": True
+                }
+        except Exception as e:
+            # 确保清理资源
+            await capture_engine.stop_capture()
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": "Failed to capture frame"
+                        "text": f"Capture error: {str(e)}"
                     }
                 ],
                 "isError": True
