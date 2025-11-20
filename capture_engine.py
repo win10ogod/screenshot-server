@@ -130,6 +130,9 @@ class GameCaptureEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_missing_logged = False
 
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_missing_logged = False
+
         self._frame_number = 0
         self._capture_task: Optional[asyncio.Task] = None
         self._window_name: Optional[str] = None
