@@ -226,6 +226,10 @@ class GameCaptureEngine:
                 window_name=window_name
             )
 
+            # 注册回调
+            self.capture.frame_handler = self._on_frame_arrived
+            self.capture.closed_handler = self._on_capture_closed
+
             # 在单独的线程中启动捕获
             self._capture_task = asyncio.create_task(self._run_capture())
 
@@ -245,12 +249,16 @@ class GameCaptureEngine:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                self.capture.start,
-                self._on_frame_arrived
+                self.capture.start
             )
         except Exception as e:
             logger.error(f"Capture loop error: {e}")
             self.status = CaptureStatus.ERROR
+
+    def _on_capture_closed(self):
+        """捕获会话结束回调"""
+        logger.info("Capture closed")
+        self.status = CaptureStatus.STOPPED
 
     async def stop_capture(self):
         """停止捕获"""
