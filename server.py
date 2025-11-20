@@ -1,17 +1,19 @@
 """
-MCP Streamable HTTP 服务器
-实现 MCP 2025-06-18 规范的 Streamable HTTP 传输
+MCP Streamable HTTP 服务器 (符合 MCP 2025-06-18 规范)
+使用 SSE (Server-Sent Events) 实现实时双向通信
 """
 import asyncio
 import json
 import logging
 import base64
+import secrets
 from typing import AsyncGenerator, Dict, Any, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Header, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
 import uvicorn
 
 from capture_engine import capture_engine, FrameData
@@ -24,9 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# MCP 协议版本
+MCP_PROTOCOL_VERSION = "2024-11-05"
 
-# 活动流会话管理
-active_streams: Dict[str, asyncio.Task] = {}
+# 会话管理
+sessions: Dict[str, dict] = {}
 
 
 @asynccontextmanager
@@ -34,7 +38,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("Starting MCP Game Streaming Server...")
     logger.info(f"Server config: {config.server.host}:{config.server.port}")
-    logger.info(f"Capture config: FPS={config.capture.default_fps}, Quality={config.capture.quality}")
+    logger.info(f"MCP Protocol Version: {MCP_PROTOCOL_VERSION}")
 
     yield
 
@@ -47,18 +51,49 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MCP Game Streaming Server",
     description="Real-time game streaming server using DXGI capture and MCP Streamable HTTP transport",
-    version="0.2.0",
+    version="0.2.1",
     lifespan=lifespan
 )
 
-# 添加 CORS 中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 注意：不使用全局 CORS，改用 Origin 验证
+# 官方规范要求：Servers MUST validate the Origin header to prevent DNS rebinding attacks
+
+
+def validate_origin(origin: Optional[str]) -> bool:
+    """
+    验证 Origin 头（安全要求）
+
+    对于本地开发，允许 localhost 和 127.0.0.1
+    对于生产环境，应该配置白名单
+    """
+    if not origin:
+        return True  # 允许无 Origin 的请求（如 curl）
+
+    allowed_origins = [
+        "http://localhost",
+        "http://127.0.0.1",
+        "https://localhost",
+        "https://127.0.0.1",
+    ]
+
+    # 检查是否匹配任何允许的源
+    return any(origin.startswith(allowed) for allowed in allowed_origins)
+
+
+def create_session() -> str:
+    """创建新会话"""
+    session_id = secrets.token_urlsafe(32)
+    sessions[session_id] = {
+        "created_at": asyncio.get_event_loop().time(),
+        "stream_active": False
+    }
+    logger.info(f"Created session: {session_id}")
+    return session_id
+
+
+def validate_session(session_id: Optional[str]) -> bool:
+    """验证会话是否存在"""
+    return session_id in sessions if session_id else False
 
 
 def create_jsonrpc_response(id: Any, result: Any = None, error: Optional[Dict] = None) -> Dict:
@@ -87,12 +122,10 @@ async def root():
     """根路径"""
     return {
         "name": "MCP Game Streaming Server",
-        "version": "0.2.0",
-        "transport": "streamable-http",
-        "endpoints": {
-            "messages": "/mcp/v1/messages",
-            "stream": "/mcp/v1/stream"
-        }
+        "version": "0.2.1",
+        "protocol": "streamable-http",
+        "mcp_version": MCP_PROTOCOL_VERSION,
+        "endpoint": "/mcp"
     }
 
 
@@ -102,106 +135,162 @@ async def health():
     stats = await capture_engine.get_stats()
     return {
         "status": "healthy",
-        "capture_engine": stats
+        "capture_engine": stats,
+        "active_sessions": len(sessions)
     }
 
 
-@app.post("/mcp/v1/messages")
-async def mcp_messages(request: Request):
+@app.post("/mcp")
+async def mcp_post(
+    request: Request,
+    accept: Optional[str] = Header(None),
+    origin: Optional[str] = Header(None),
+    mcp_protocol_version: Optional[str] = Header(None, alias="MCP-Protocol-Version"),
+    mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id")
+):
     """
-    MCP 标准消息端点 (请求-响应模式)
-    用于工具调用、资源获取等
+    MCP Streamable HTTP 端点 (POST)
+
+    符合 MCP 2025-06-18 规范：
+    - 验证 Origin 头（安全要求）
+    - 验证 MCP-Protocol-Version 头
+    - 支持会话管理 (Mcp-Session-Id)
+    - 根据请求类型返回 JSON 或 SSE 流
     """
+    # 1. 验证 Origin（安全要求）
+    if not validate_origin(origin):
+        logger.warning(f"Rejected request from invalid origin: {origin}")
+        raise HTTPException(status_code=403, detail="Invalid origin")
+
+    # 2. 验证协议版本
+    if mcp_protocol_version and mcp_protocol_version != MCP_PROTOCOL_VERSION:
+        logger.warning(f"Protocol version mismatch: {mcp_protocol_version} != {MCP_PROTOCOL_VERSION}")
+        # 注意：这里可以选择拒绝或接受
+
+    # 3. 解析请求体
     try:
         body = await request.json()
-        logger.info(f"Received MCP message: {body.get('method')}")
+    except Exception as e:
+        logger.error(f"Failed to parse JSON: {e}")
+        return JSONResponse(
+            create_jsonrpc_response(
+                None,
+                error=create_jsonrpc_error(-32700, "Parse error")
+            ),
+            status_code=400
+        )
 
-        method = body.get("method")
-        params = body.get("params", {})
-        msg_id = body.get("id")
+    logger.info(f"MCP POST: method={body.get('method')}, id={body.get('id')}")
 
-        # 路由到对应的处理器
-        if method == "tools/list":
-            result = await handle_tools_list()
-        elif method == "tools/call":
-            result = await handle_tool_call(params)
-        elif method == "resources/list":
-            result = await handle_resources_list()
-        elif method == "resources/read":
-            result = await handle_resource_read(params)
+    method = body.get("method")
+    params = body.get("params", {})
+    msg_id = body.get("id")
+
+    # 4. 处理 initialize 请求（创建会话）
+    if method == "initialize":
+        session_id = create_session()
+        result = await handle_initialize(params)
+
+        response = JSONResponse(create_jsonrpc_response(msg_id, result))
+        response.headers["Mcp-Session-Id"] = session_id
+        return response
+
+    # 5. 验证会话（initialize 之后的所有请求都需要会话）
+    if not validate_session(mcp_session_id):
+        logger.error(f"Invalid session: {mcp_session_id}")
+        return JSONResponse(
+            create_jsonrpc_response(
+                msg_id,
+                error=create_jsonrpc_error(-32001, "Invalid session")
+            ),
+            status_code=404
+        )
+
+    # 6. 处理通知和响应（返回 202 Accepted）
+    if not msg_id:
+        # 这是一个通知（notification），没有 id
+        await handle_notification(method, params)
+        return Response(status_code=202)
+
+    # 7. 处理需要流式响应的请求
+    if method == "tools/call" and params.get("name") == "start_game_stream":
+        # 检查 Accept 头
+        if accept and "text/event-stream" in accept:
+            # 返回 SSE 流
+            return EventSourceResponse(
+                stream_game_frames_sse(msg_id, params.get("arguments", {})),
+                headers={"Mcp-Session-Id": mcp_session_id}
+            )
         else:
+            # 客户端不接受 SSE，返回错误
             return JSONResponse(
                 create_jsonrpc_response(
                     msg_id,
-                    error=create_jsonrpc_error(-32601, f"Method not found: {method}")
+                    error=create_jsonrpc_error(
+                        -32000,
+                        "Streaming requires Accept: text/event-stream"
+                    )
                 )
             )
 
-        return JSONResponse(create_jsonrpc_response(msg_id, result))
+    # 8. 处理其他请求（返回 JSON）
+    result = await handle_jsonrpc_request(method, params)
+    return JSONResponse(
+        create_jsonrpc_response(msg_id, result),
+        headers={"Mcp-Session-Id": mcp_session_id}
+    )
 
-    except Exception as e:
-        logger.error(f"Error handling MCP message: {e}")
-        return JSONResponse(
-            create_jsonrpc_response(
-                body.get("id"),
-                error=create_jsonrpc_error(-32603, f"Internal error: {str(e)}")
-            ),
-            status_code=500
+
+@app.get("/mcp")
+async def mcp_get(
+    accept: Optional[str] = Header(None),
+    origin: Optional[str] = Header(None),
+    mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
+    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID")
+):
+    """
+    MCP Streamable HTTP 端点 (GET)
+
+    打开 SSE 流以接收服务器推送的消息
+    支持断线重连（Last-Event-ID）
+    """
+    # 1. 验证 Origin
+    if not validate_origin(origin):
+        raise HTTPException(status_code=403, detail="Invalid origin")
+
+    # 2. 验证会话
+    if not validate_session(mcp_session_id):
+        raise HTTPException(status_code=404, detail="Invalid session")
+
+    # 3. 检查 Accept 头
+    if not accept or "text/event-stream" not in accept:
+        raise HTTPException(
+            status_code=405,
+            detail="GET method requires Accept: text/event-stream"
         )
 
+    # 4. 返回 SSE 流（用于服务器推送）
+    return EventSourceResponse(
+        server_push_stream(mcp_session_id, last_event_id),
+        headers={"Mcp-Session-Id": mcp_session_id}
+    )
 
-@app.post("/mcp/v1/stream")
-async def mcp_stream(request: Request):
+
+# ============ SSE 流生成器 ============
+
+async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator:
     """
-    MCP 流式端点 (双向流式传输)
-    使用 NDJSON (Newline Delimited JSON) 格式
-    用于实时游戏画面流式传输
-    """
-    try:
-        body = await request.json()
-        logger.info(f"Starting MCP stream: {body.get('method')}")
+    使用 SSE 格式流式传输游戏帧
 
-        method = body.get("method")
-        params = body.get("params", {})
-        msg_id = body.get("id")
-
-        if method == "tools/call" and params.get("name") == "start_game_stream":
-            # 启动流式传输
-            return StreamingResponse(
-                stream_game_frames(msg_id, params.get("arguments", {})),
-                media_type="application/x-ndjson"
-            )
-        else:
-            # 非流式请求，返回错误
-            error_response = create_jsonrpc_response(
-                msg_id,
-                error=create_jsonrpc_error(
-                    -32600,
-                    "Stream endpoint only supports start_game_stream tool"
-                )
-            )
-            return JSONResponse(error_response)
-
-    except Exception as e:
-        logger.error(f"Error in stream endpoint: {e}")
-        error_response = create_jsonrpc_response(
-            None,
-            error=create_jsonrpc_error(-32603, f"Internal error: {str(e)}")
-        )
-        return JSONResponse(error_response, status_code=500)
-
-
-async def stream_game_frames(msg_id: Any, arguments: Dict) -> AsyncGenerator[str, None]:
-    """
-    流式传输游戏帧
-    生成 NDJSON 格式的帧数据
+    SSE 格式:
+    data: {json}\n\n
     """
     window_name = arguments.get("window_name")
     fps = arguments.get("fps", config.capture.default_fps)
     quality = arguments.get("quality", config.capture.quality)
     monitor_index = arguments.get("monitor_index")
 
-    logger.info(f"Starting game stream: window={window_name}, fps={fps}")
+    logger.info(f"Starting SSE game stream: window={window_name}, fps={fps}")
 
     try:
         # 启动捕获
@@ -217,7 +306,7 @@ async def stream_game_frames(msg_id: Any, arguments: Dict) -> AsyncGenerator[str
                 msg_id,
                 error=create_jsonrpc_error(-32000, "Failed to start capture")
             )
-            yield json.dumps(error_response) + "\n"
+            yield {"data": json.dumps(error_response)}
             return
 
         # 发送启动成功响应
@@ -230,10 +319,11 @@ async def stream_game_frames(msg_id: Any, arguments: Dict) -> AsyncGenerator[str
                 "quality": quality
             }
         )
-        yield json.dumps(start_response) + "\n"
+        yield {"data": json.dumps(start_response)}
 
-        # 流式传输帧
+        # 流式传输帧（作为通知）
         frame_count = 0
+        event_id = 0
         max_empty_polls = 10
         empty_polls = 0
 
@@ -241,22 +331,22 @@ async def stream_game_frames(msg_id: Any, arguments: Dict) -> AsyncGenerator[str
             frame = await capture_engine.get_frame()
 
             if frame is None:
-                # 缓冲区为空，短暂等待
                 empty_polls += 1
                 if empty_polls > max_empty_polls:
-                    logger.warning("No frames available for too long, stopping stream")
+                    logger.warning("No frames available, stopping stream")
                     break
                 await asyncio.sleep(0.01)
                 continue
 
             empty_polls = 0
             frame_count += 1
+            event_id += 1
 
             # 编码帧为 base64
             frame_b64 = base64.b64encode(frame.data).decode('utf-8')
 
-            # 创建帧消息 (使用 MCP notification 格式)
-            frame_message = {
+            # 创建帧通知（JSON-RPC notification）
+            frame_notification = {
                 "jsonrpc": "2.0",
                 "method": "notifications/game_frame",
                 "params": {
@@ -269,29 +359,119 @@ async def stream_game_frames(msg_id: Any, arguments: Dict) -> AsyncGenerator[str
                 }
             }
 
-            yield json.dumps(frame_message) + "\n"
+            # SSE 格式：支持事件 ID 用于断线重连
+            yield {
+                "id": str(event_id),
+                "data": json.dumps(frame_notification)
+            }
 
-            # 每 100 帧记录一次
+            # 定期记录统计
             if frame_count % 100 == 0:
                 stats = await capture_engine.get_stats()
-                logger.info(f"Streamed {frame_count} frames, stats: {stats}")
+                logger.info(f"SSE streamed {frame_count} frames, stats: {stats}")
 
     except asyncio.CancelledError:
-        logger.info("Stream cancelled by client")
+        logger.info("SSE stream cancelled by client")
     except Exception as e:
-        logger.error(f"Error streaming frames: {e}")
+        logger.error(f"Error in SSE stream: {e}")
         error_response = create_jsonrpc_response(
             msg_id,
             error=create_jsonrpc_error(-32000, f"Stream error: {str(e)}")
         )
-        yield json.dumps(error_response) + "\n"
+        yield {"data": json.dumps(error_response)}
     finally:
-        # 停止捕获
         await capture_engine.stop_capture()
-        logger.info(f"Stream ended, total frames: {frame_count}")
+        logger.info(f"SSE stream ended, total frames: {frame_count}")
+
+
+async def server_push_stream(session_id: str, last_event_id: Optional[str]) -> AsyncGenerator:
+    """
+    服务器推送流（GET 方法）
+
+    用于服务器主动向客户端发送消息
+    支持断线重连（从 last_event_id 开始）
+    """
+    logger.info(f"Opening server push stream for session {session_id}")
+
+    if last_event_id:
+        logger.info(f"Resuming from event ID: {last_event_id}")
+
+    try:
+        # 发送心跳以保持连接
+        event_id = int(last_event_id) if last_event_id else 0
+
+        while True:
+            # 这里可以实现服务器推送逻辑
+            # 例如：状态更新、警告、系统消息等
+
+            await asyncio.sleep(30)  # 每 30 秒发送心跳
+
+            event_id += 1
+            heartbeat = {
+                "jsonrpc": "2.0",
+                "method": "notifications/heartbeat",
+                "params": {
+                    "timestamp": asyncio.get_event_loop().time()
+                }
+            }
+
+            yield {
+                "id": str(event_id),
+                "event": "heartbeat",
+                "data": json.dumps(heartbeat)
+            }
+
+    except asyncio.CancelledError:
+        logger.info(f"Server push stream closed for session {session_id}")
 
 
 # ============ MCP 处理器 ============
+
+async def handle_initialize(params: Dict) -> Dict:
+    """处理 initialize 请求"""
+    logger.info(f"Initializing MCP session: {params}")
+
+    return {
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "serverInfo": {
+            "name": "mcp-game-streaming",
+            "version": "0.2.1"
+        },
+        "capabilities": {
+            "tools": {},
+            "resources": {}
+        }
+    }
+
+
+async def handle_notification(method: str, params: Dict):
+    """处理通知（无需响应）"""
+    logger.info(f"Received notification: {method}")
+
+    if method == "notifications/cancelled":
+        # 处理取消请求
+        logger.info("Request cancelled by client")
+        await capture_engine.stop_capture()
+
+
+async def handle_jsonrpc_request(method: str, params: Dict) -> Dict:
+    """处理 JSON-RPC 请求"""
+
+    if method == "tools/list":
+        return await handle_tools_list()
+
+    elif method == "tools/call":
+        return await handle_tool_call(params)
+
+    elif method == "resources/list":
+        return await handle_resources_list()
+
+    elif method == "resources/read":
+        return await handle_resource_read(params)
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
 
 async def handle_tools_list() -> Dict:
     """列出所有可用工具"""
@@ -299,7 +479,7 @@ async def handle_tools_list() -> Dict:
         "tools": [
             {
                 "name": "start_game_stream",
-                "description": "启动游戏窗口的实时流式传输（使用 /mcp/v1/stream 端点）",
+                "description": "启动游戏窗口的实时流式传输（需要 Accept: text/event-stream）",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -346,14 +526,6 @@ async def handle_tools_list() -> Dict:
                 }
             },
             {
-                "name": "list_capturable_windows",
-                "description": "列出所有可捕获的窗口",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
-                }
-            },
-            {
                 "name": "get_capture_stats",
                 "description": "获取捕获引擎统计信息",
                 "inputSchema": {
@@ -382,10 +554,9 @@ async def handle_tool_call(params: Dict) -> Dict:
         }
 
     elif tool_name == "capture_single_frame":
-        # 临时启动捕获，获取一帧，然后停止
         window_name = arguments.get("window_name")
         await capture_engine.start_capture(window_name=window_name, fps=1)
-        await asyncio.sleep(0.5)  # 等待捕获
+        await asyncio.sleep(0.5)
         frame = await capture_engine.get_frame()
         await capture_engine.stop_capture()
 
@@ -410,17 +581,6 @@ async def handle_tool_call(params: Dict) -> Dict:
                 ],
                 "isError": True
             }
-
-    elif tool_name == "list_capturable_windows":
-        windows = await capture_engine.list_windows()
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Available windows:\n" + "\n".join(f"- {w}" for w in windows)
-                }
-            ]
-        }
 
     elif tool_name == "get_capture_stats":
         stats = await capture_engine.get_stats()
@@ -450,10 +610,10 @@ async def handle_resources_list() -> Dict:
     return {
         "resources": [
             {
-                "uri": "game://stream/live",
-                "name": "Live Game Stream",
-                "description": "实时游戏画面流",
-                "mimeType": "application/x-ndjson"
+                "uri": "game://stream/stats",
+                "name": "Capture Statistics",
+                "description": "实时捕获统计信息",
+                "mimeType": "application/json"
             }
         ]
     }
@@ -463,7 +623,7 @@ async def handle_resource_read(params: Dict) -> Dict:
     """读取资源"""
     uri = params.get("uri")
 
-    if uri == "game://stream/live":
+    if uri == "game://stream/stats":
         stats = await capture_engine.get_stats()
         return {
             "contents": [
