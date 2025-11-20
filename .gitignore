@@ -8,3 +8,37 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
+env/
+
+# Logs
+*.log
+mcp_server.log*
+
+# Output files
+frames/
+game_frames/
+*.jpg
+*.jpeg
+*.png
+screenshot*.jpg
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+test_output/
+coverage/
+.pytest_cache/
