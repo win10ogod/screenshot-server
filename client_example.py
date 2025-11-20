@@ -172,7 +172,17 @@ class MCPStreamingClient:
                     if message.get("method") == "notifications/game_frame":
                         params = message["params"]
                         frame_number = params["frame_number"]
-                        frame_data = base64.b64decode(params["data"])
+
+                        # 提取 MCP Image Content（避免把 Base64 当文本处理）
+                        frame_data = None
+                        for item in params.get("content", []):
+                            if item.get("type") == "image":
+                                frame_data = base64.b64decode(item["data"])
+                                break
+
+                        if frame_data is None:
+                            logger.error("No image content in frame notification")
+                            continue
 
                         frame_count += 1
 

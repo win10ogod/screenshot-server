@@ -62,14 +62,11 @@ async def capture_single_frame(
     try:
         if WINDOWS_CAPTURE_AVAILABLE and capture_engine:
             # 使用高性能 DXGI 捕获
-            await capture_engine.start_capture(
+            frame = await capture_engine.capture_single_frame(
                 window_name=window_name,
                 monitor_index=monitor_index,
-                fps=1,
+                timeout=2.5,
             )
-            await asyncio.sleep(0.5)  # 等待捕获
-            frame = await capture_engine.get_frame()
-            await capture_engine.stop_capture()
 
             if frame:
                 return Image(data=frame.data, format="jpeg").to_image_content()

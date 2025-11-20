@@ -161,11 +161,11 @@ curl -X POST http://localhost:8000/mcp/v1/stream \
   }'
 ```
 
-响应将是 NDJSON 流，每行一个 JSON 对象：
+响应将是 NDJSON 流，每行一个 JSON 对象，帧通知使用 MCP 原生 Image Content：
 ```json
 {"jsonrpc":"2.0","id":1,"result":{"status":"started","fps":60}}
-{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":1,"data":"base64..."}}
-{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":2,"data":"base64..."}}
+{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":1,"content":[{"type":"image","data":"base64...","mimeType":"image/jpeg"}]}}
+{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":2,"content":[{"type":"image","data":"base64...","mimeType":"image/jpeg"}]}}
 ...
 ```
 
