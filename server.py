@@ -383,16 +383,22 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
             frame_b64 = base64.b64encode(frame.data).decode('utf-8')
 
             # 创建帧通知（JSON-RPC notification）
+            # 使用 MCP 原生的 image 类型，而不是将 base64 放在 text 中
             frame_notification = {
                 "jsonrpc": "2.0",
                 "method": "notifications/game_frame",
                 "params": {
                     "frame_number": frame.frame_number,
                     "timestamp": frame.timestamp,
-                    "format": frame.format,
                     "width": frame.width,
                     "height": frame.height,
-                    "data": frame_b64
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": frame_b64,
+                            "mimeType": f"image/{frame.format}"
+                        }
+                    ]
                 }
             }
 
