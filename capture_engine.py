@@ -271,11 +271,11 @@ class GameCaptureEngine:
             self.capture = WindowsCapture(**settings)
 
             # 在后台线程启动捕获
+            # 使用 lambda 包装以正确传递回调参数
             loop = asyncio.get_event_loop()
             loop.run_in_executor(
                 self.executor,
-                self.capture.start,
-                self._on_frame_arrived
+                lambda: self.capture.start(self._on_frame_arrived)
             )
 
             self.status = CaptureStatus.RUNNING
