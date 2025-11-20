@@ -127,6 +127,7 @@ class GameCaptureEngine:
         self.capture: Optional[WindowsCapture] = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_missing_logged = False
 
         self._frame_number = 0
         self._capture_task: Optional[asyncio.Task] = None
@@ -140,9 +141,16 @@ class GameCaptureEngine:
     def _on_frame_arrived(self, frame: Frame, control: InternalCaptureControl):
         """帧到达回调 (在捕获线程中调用)"""
         try:
-            if not self._loop or self._loop.is_closed():
-                logger.error("Async event loop not available for frame processing")
+            if self.status != CaptureStatus.RUNNING:
                 return
+
+            if not self._loop or self._loop.is_closed():
+                if not self._loop_missing_logged:
+                    logger.error("Async event loop not available for frame processing")
+                    self._loop_missing_logged = True
+                return
+
+            self._loop_missing_logged = False
 
             # 将帧处理移到主事件循环中执行
             self._loop.call_soon_threadsafe(
@@ -221,6 +229,7 @@ class GameCaptureEngine:
 
             # 记录当前事件循环，供回调线程使用
             self._loop = asyncio.get_running_loop()
+            self._loop_missing_logged = False
 
             # 创建流控制器
             self.stream_controller = StreamController(target_fps=self._fps)
@@ -270,6 +279,8 @@ class GameCaptureEngine:
         """捕获会话结束回调"""
         logger.info("Capture closed")
         self.status = CaptureStatus.STOPPED
+        self._loop = None
+        self._loop_missing_logged = False
 
     async def stop_capture(self):
         """停止捕获"""
@@ -291,7 +302,7 @@ class GameCaptureEngine:
                         pass
 
                 self.capture = None
-                self._loop = None
+                # 留待关闭回调清理事件循环引用，避免回调线程记录缺失错误
 
             await self.frame_buffer.clear()
             logger.info("Capture stopped")
