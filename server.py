@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, Header, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sse_starlette.sse import EventSourceResponse
 import uvicorn
 
 from capture_engine import capture_engine, FrameData
@@ -117,6 +116,35 @@ def create_jsonrpc_error(code: int, message: str, data: Any = None) -> Dict:
     return error
 
 
+def format_sse_event(data: str, event_id: Optional[str] = None, event_type: Optional[str] = None) -> str:
+    """
+    格式化 SSE 事件
+
+    SSE 格式:
+    id: <id>
+    event: <event_type>
+    data: <data>
+    <blank line>
+    """
+    lines = []
+
+    if event_id:
+        lines.append(f"id: {event_id}")
+
+    if event_type:
+        lines.append(f"event: {event_type}")
+
+    # 确保数据不为空
+    if data:
+        lines.append(f"data: {data}")
+    else:
+        # 发送注释行保持连接
+        return ": keepalive\n\n"
+
+    # SSE 事件以双换行符结束
+    return "\n".join(lines) + "\n\n"
+
+
 @app.get("/")
 async def root():
     """根路径"""
@@ -217,9 +245,14 @@ async def mcp_post(
         # 检查 Accept 头
         if accept and "text/event-stream" in accept:
             # 返回 SSE 流
-            return EventSourceResponse(
+            return StreamingResponse(
                 stream_game_frames_sse(msg_id, params.get("arguments", {})),
-                headers={"Mcp-Session-Id": mcp_session_id}
+                media_type="text/event-stream",
+                headers={
+                    "Mcp-Session-Id": mcp_session_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no"
+                }
             )
         else:
             # 客户端不接受 SSE，返回错误
@@ -270,20 +303,24 @@ async def mcp_get(
         )
 
     # 4. 返回 SSE 流（用于服务器推送）
-    return EventSourceResponse(
+    return StreamingResponse(
         server_push_stream(mcp_session_id, last_event_id),
-        headers={"Mcp-Session-Id": mcp_session_id}
+        media_type="text/event-stream",
+        headers={
+            "Mcp-Session-Id": mcp_session_id,
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"
+        }
     )
 
 
 # ============ SSE 流生成器 ============
 
-async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator:
+async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator[str, None]:
     """
     使用 SSE 格式流式传输游戏帧
 
-    SSE 格式:
-    data: {json}\n\n
+    Yields SSE 格式化的字符串
     """
     window_name = arguments.get("window_name")
     fps = arguments.get("fps", config.capture.default_fps)
@@ -306,7 +343,7 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
                 msg_id,
                 error=create_jsonrpc_error(-32000, "Failed to start capture")
             )
-            yield {"data": json.dumps(error_response)}
+            yield format_sse_event(json.dumps(error_response))
             return
 
         # 发送启动成功响应
@@ -319,7 +356,7 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
                 "quality": quality
             }
         )
-        yield {"data": json.dumps(start_response)}
+        yield format_sse_event(json.dumps(start_response))
 
         # 流式传输帧（作为通知）
         frame_count = 0
@@ -359,11 +396,11 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
                 }
             }
 
-            # SSE 格式：支持事件 ID 用于断线重连
-            yield {
-                "id": str(event_id),
-                "data": json.dumps(frame_notification)
-            }
+            # 格式化为 SSE 事件
+            yield format_sse_event(
+                json.dumps(frame_notification),
+                event_id=str(event_id)
+            )
 
             # 定期记录统计
             if frame_count % 100 == 0:
@@ -378,13 +415,13 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
             msg_id,
             error=create_jsonrpc_error(-32000, f"Stream error: {str(e)}")
         )
-        yield {"data": json.dumps(error_response)}
+        yield format_sse_event(json.dumps(error_response))
     finally:
         await capture_engine.stop_capture()
         logger.info(f"SSE stream ended, total frames: {frame_count}")
 
 
-async def server_push_stream(session_id: str, last_event_id: Optional[str]) -> AsyncGenerator:
+async def server_push_stream(session_id: str, last_event_id: Optional[str]) -> AsyncGenerator[str, None]:
     """
     服务器推送流（GET 方法）
 
@@ -415,11 +452,11 @@ async def server_push_stream(session_id: str, last_event_id: Optional[str]) -> A
                 }
             }
 
-            yield {
-                "id": str(event_id),
-                "event": "heartbeat",
-                "data": json.dumps(heartbeat)
-            }
+            yield format_sse_event(
+                json.dumps(heartbeat),
+                event_id=str(event_id),
+                event_type="heartbeat"
+            )
 
     except asyncio.CancelledError:
         logger.info(f"Server push stream closed for session {session_id}")
