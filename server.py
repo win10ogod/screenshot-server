@@ -522,7 +522,7 @@ async def handle_tools_list() -> Dict:
                     "properties": {
                         "window_name": {
                             "type": "string",
-                            "description": "要捕获的窗口名称（如 'Elden Ring'），留空则捕获整个屏幕"
+                            "description": "要捕获的窗口名称，留空则捕获整个屏幕"
                         },
                         "fps": {
                             "type": "integer",

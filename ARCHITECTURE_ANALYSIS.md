@@ -241,7 +241,7 @@ POST /mcp/v1/stream
 ##### 消息格式（NDJSON）
 ```json
 // 客户端请求
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"start_game_stream","arguments":{"window":"Elden Ring","fps":60}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"start_game_stream","arguments":{"window":"<窗口名称>","fps":60}}}
 
 // 服务器流式响应
 {"jsonrpc":"2.0","id":1,"result":{"frame":1,"data":"base64..."}}

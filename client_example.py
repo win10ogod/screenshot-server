@@ -224,7 +224,7 @@ async def example_stream_30_seconds():
     try:
         # 流式传输 30 秒，保存所有帧
         await client.stream_game(
-            window_name=None,  # 指定窗口名，如 "Elden Ring"
+            window_name=None,  # 指定窗口名
             fps=30,
             quality=80,
             duration=30,
