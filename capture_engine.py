@@ -125,6 +125,10 @@ class GameCaptureEngine:
         self.frame_buffer = FrameBuffer(max_size=config.stream.buffer_size)
         self.stream_controller: Optional[StreamController] = None
         self.capture: Optional[WindowsCapture] = None
+        self._capture_control: Optional[InternalCaptureControl] = None
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_missing_logged = False
 
         self._frame_number = 0
         self._capture_task: Optional[asyncio.Task] = None
@@ -138,22 +142,48 @@ class GameCaptureEngine:
     def _on_frame_arrived(self, frame: Frame, control: InternalCaptureControl):
         """帧到达回调 (在捕获线程中调用)"""
         try:
-            # 将帧处理移到异步任务
-            asyncio.create_task(self._process_frame(frame))
+            if self.status != CaptureStatus.RUNNING:
+                return
+
+            # 保存控制句柄，便于在停止时优雅关闭捕获线程
+            if control:
+                self._capture_control = control
+
+            if not self._loop or self._loop.is_closed():
+                if not self._loop_missing_logged:
+                    logger.error("Async event loop not available for frame processing")
+                    self._loop_missing_logged = True
+                return
+
+            self._loop_missing_logged = False
+
+            # 将帧处理移到主事件循环中执行
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._process_frame(frame))
+            )
         except Exception as e:
             logger.error(f"Error in frame callback: {e}")
 
     async def _process_frame(self, frame: Frame):
         """处理单个帧"""
         try:
-            # 获取帧数据 (零拷贝)
-            buffer = frame.get_buffer()
-
-            # 转换为 PIL Image
-            # 注意: windows-capture 返回的是 BGRA 格式
             width = frame.width
             height = frame.height
-            img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+
+            # 获取帧数据（兼容不同 windows-capture 版本）
+            if hasattr(frame, "get_buffer"):
+                # 旧版 API
+                buffer = frame.get_buffer()
+                img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+            elif hasattr(frame, "frame_buffer"):
+                # 新版 API 返回 numpy.ndarray（BGRA）
+                np_frame = frame.frame_buffer
+                try:
+                    img = Image.fromarray(np_frame, mode='BGRA')
+                except Exception:
+                    img = Image.frombytes('RGBA', (width, height), np_frame.tobytes(), 'raw', 'BGRA')
+            else:
+                raise AttributeError("Frame does not expose buffer data")
 
             # 转换为 RGB 并压缩为 JPEG
             img_rgb = img.convert('RGB')
@@ -211,6 +241,10 @@ class GameCaptureEngine:
             self._fps = fps or config.capture.default_fps
             self._quality = quality or config.capture.quality
 
+            # 记录当前事件循环，供回调线程使用
+            self._loop = asyncio.get_running_loop()
+            self._loop_missing_logged = False
+
             # 创建流控制器
             self.stream_controller = StreamController(target_fps=self._fps)
 
@@ -225,6 +259,10 @@ class GameCaptureEngine:
                 monitor_index=monitor_index,
                 window_name=window_name
             )
+
+            # 注册回调
+            self.capture.frame_handler = self._on_frame_arrived
+            self.capture.closed_handler = self._on_capture_closed
 
             # 在单独的线程中启动捕获
             self._capture_task = asyncio.create_task(self._run_capture())
@@ -245,12 +283,19 @@ class GameCaptureEngine:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                self.capture.start,
-                self._on_frame_arrived
+                self.capture.start
             )
         except Exception as e:
             logger.error(f"Capture loop error: {e}")
             self.status = CaptureStatus.ERROR
+
+    def _on_capture_closed(self):
+        """捕获会话结束回调"""
+        logger.info("Capture closed")
+        self.status = CaptureStatus.STOPPED
+        self._loop = None
+        self._loop_missing_logged = False
+        self._capture_control = None
 
     async def stop_capture(self):
         """停止捕获"""
@@ -260,6 +305,13 @@ class GameCaptureEngine:
 
         try:
             self.status = CaptureStatus.STOPPED
+
+            # 优先通过控制句柄请求捕获线程自行退出
+            if self._capture_control:
+                try:
+                    self._capture_control.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop capture via control handle: {e}")
 
             if self.capture:
                 # windows-capture 不提供显式的 stop 方法
@@ -272,8 +324,12 @@ class GameCaptureEngine:
                         pass
 
                 self.capture = None
+                # 留待关闭回调清理事件循环引用，避免回调线程记录缺失错误
 
             await self.frame_buffer.clear()
+            self._loop = None
+            self._loop_missing_logged = False
+            self._capture_control = None
             logger.info("Capture stopped")
 
         except Exception as e:
@@ -282,6 +338,41 @@ class GameCaptureEngine:
     async def get_frame(self) -> Optional[FrameData]:
         """获取一帧 (非阻塞)"""
         return await self.frame_buffer.pop()
+
+    async def get_frame_with_timeout(self, timeout: float = 2.0) -> Optional[FrameData]:
+        """等待获取一帧，超时返回 None"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            frame = await self.frame_buffer.pop()
+            if frame:
+                return frame
+            await asyncio.sleep(0.05)
+        logger.warning("Timed out waiting for frame")
+        return None
+
+    async def capture_single_frame(
+        self,
+        window_name: Optional[str] = None,
+        monitor_index: Optional[int] = None,
+        quality: Optional[int] = None,
+        timeout: float = 2.0,
+    ) -> Optional[FrameData]:
+        """一键捕获单帧，负责启动、等待和停止"""
+        started = await self.start_capture(
+            window_name=window_name,
+            monitor_index=monitor_index,
+            fps=1,
+            quality=quality,
+        )
+        if not started:
+            return None
+
+        try:
+            # 等待第一帧到达（带超时）
+            frame = await self.get_frame_with_timeout(timeout)
+            return frame
+        finally:
+            await self.stop_capture()
 
     async def get_stats(self) -> dict:
         """获取捕获统计"""
@@ -365,6 +456,33 @@ class FallbackCaptureEngine:
     async def get_frame(self) -> Optional[FrameData]:
         """获取帧"""
         return await self.frame_buffer.pop()
+
+    async def capture_single_frame(
+        self,
+        window_name: Optional[str] = None,
+        monitor_index: Optional[int] = None,
+        quality: Optional[int] = None,
+        timeout: float = 2.0,
+    ) -> Optional[FrameData]:
+        """简单的单帧捕获实现（不区分窗口/显示器）"""
+        if not self.pyautogui:
+            logger.error("pyautogui not available")
+            return None
+
+        buffer = io.BytesIO()
+        screenshot = self.pyautogui.screenshot()
+        screenshot.convert("RGB").save(
+            buffer,
+            format="JPEG",
+            quality=quality or 60,
+            optimize=True,
+        )
+        return FrameData(
+            frame_number=0,
+            timestamp=time.time(),
+            data=buffer.getvalue(),
+            format="jpeg",
+        )
 
     async def get_stats(self) -> dict:
         """获取统计"""

@@ -42,12 +42,16 @@ mcp = FastMCP("mcp-game-streaming")
 
 
 @mcp.tool()
-async def capture_single_frame(window_name: str = None) -> ImageContent:
+async def capture_single_frame(
+    window_name: str = None,
+    monitor_index: int = None,
+) -> ImageContent:
     """
     捕获单帧游戏画面
 
     Args:
         window_name: 窗口名称，留空则捕获整个屏幕
+        monitor_index: 显示器索引（None 表示主显示器）
     """
     # Treat empty or whitespace-only input as None to allow full-screen capture
     if isinstance(window_name, str) and not window_name.strip():
@@ -58,10 +62,11 @@ async def capture_single_frame(window_name: str = None) -> ImageContent:
     try:
         if WINDOWS_CAPTURE_AVAILABLE and capture_engine:
             # 使用高性能 DXGI 捕获
-            await capture_engine.start_capture(window_name=window_name, fps=1)
-            await asyncio.sleep(0.5)  # 等待捕获
-            frame = await capture_engine.get_frame()
-            await capture_engine.stop_capture()
+            frame = await capture_engine.capture_single_frame(
+                window_name=window_name,
+                monitor_index=monitor_index,
+                timeout=2.5,
+            )
 
             if frame:
                 return Image(data=frame.data, format="jpeg").to_image_content()

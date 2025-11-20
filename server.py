@@ -379,10 +379,7 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
             frame_count += 1
             event_id += 1
 
-            # 编码帧为 base64
-            frame_b64 = base64.b64encode(frame.data).decode('utf-8')
-
-            # 创建帧通知（JSON-RPC notification）
+            # 创建帧通知（使用 MCP 原生 Image Content，避免将 Base64 当作文本传输）
             frame_notification = {
                 "jsonrpc": "2.0",
                 "method": "notifications/game_frame",
@@ -392,8 +389,14 @@ async def stream_game_frames_sse(msg_id: Any, arguments: Dict) -> AsyncGenerator
                     "format": frame.format,
                     "width": frame.width,
                     "height": frame.height,
-                    "data": frame_b64
-                }
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(frame.data).decode("utf-8"),
+                            "mimeType": "image/jpeg",
+                        }
+                    ],
+                },
             }
 
             # 格式化为 SSE 事件
@@ -558,6 +561,10 @@ async def handle_tools_list() -> Dict:
                         "window_name": {
                             "type": "string",
                             "description": "窗口名称"
+                        },
+                        "monitor_index": {
+                            "type": "integer",
+                            "description": "显示器索引（None = 主显示器）"
                         }
                     }
                 }
@@ -596,10 +603,12 @@ async def handle_tool_call(params: Dict) -> Dict:
         if isinstance(window_name, str) and not window_name.strip():
             window_name = None
 
-        await capture_engine.start_capture(window_name=window_name, fps=1)
-        await asyncio.sleep(0.5)
-        frame = await capture_engine.get_frame()
-        await capture_engine.stop_capture()
+        monitor_index = arguments.get("monitor_index")
+        frame = await capture_engine.capture_single_frame(
+            window_name=window_name,
+            monitor_index=monitor_index,
+            timeout=2.5,
+        )
 
         if frame:
             frame_b64 = base64.b64encode(frame.data).decode('utf-8')

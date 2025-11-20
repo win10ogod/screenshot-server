@@ -161,11 +161,11 @@ curl -X POST http://localhost:8000/mcp/v1/stream \
   }'
 ```
 
-响应将是 NDJSON 流，每行一个 JSON 对象：
+响应将是 NDJSON 流，每行一个 JSON 对象，帧通知使用 MCP 原生 Image Content：
 ```json
 {"jsonrpc":"2.0","id":1,"result":{"status":"started","fps":60}}
-{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":1,"data":"base64..."}}
-{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":2,"data":"base64..."}}
+{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":1,"content":[{"type":"image","data":"base64...","mimeType":"image/jpeg"}]}}
+{"jsonrpc":"2.0","method":"notifications/game_frame","params":{"frame_number":2,"content":[{"type":"image","data":"base64...","mimeType":"image/jpeg"}]}}
 ...
 ```
 
@@ -233,6 +233,13 @@ CAPTURE_QUALITY=90
 
 **参数**:
 - `window_name` (string, optional): 窗口名称
+- `monitor_index` (integer, optional): 显示器索引（留空或 None = 主显示器）
+
+**windows-capture 用法速记**:
+- 捕获整个主屏幕：省略 `window_name`，不用传任何参数。
+- 捕获特定显示器：只传 `monitor_index`，例如 `monitor_index=1` 捕获第二块屏幕。
+- 捕获窗口：传入准确的 `window_name`，必要时先调用 `list_capturable_windows` 查找窗口标题。
+- 如果传入空字符串会被自动视为 `None`，用于确保全屏捕获正常工作。
 
 ### 4. `list_capturable_windows`
 列出所有可捕获的窗口

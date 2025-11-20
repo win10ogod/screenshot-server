@@ -60,15 +60,22 @@ class MCPStreamingClient:
     async def capture_single_frame(
         self,
         window_name: Optional[str] = None,
+        monitor_index: Optional[int] = None,
         save_path: Optional[str] = None
     ):
         """捕获单帧并可选保存"""
-        logger.info(f"Capturing single frame from window: {window_name or 'screen'}")
-
-        response = await self.call_tool(
-            "capture_single_frame",
-            {"window_name": window_name} if window_name else {}
+        logger.info(
+            f"Capturing single frame from window: {window_name or 'screen'}, "
+            f"monitor: {monitor_index if monitor_index is not None else 'primary'}"
         )
+
+        payload = {}
+        if window_name:
+            payload["window_name"] = window_name
+        if monitor_index is not None:
+            payload["monitor_index"] = monitor_index
+
+        response = await self.call_tool("capture_single_frame", payload)
 
         result = response.get("result", {})
         content = result.get("content", [])
@@ -165,7 +172,17 @@ class MCPStreamingClient:
                     if message.get("method") == "notifications/game_frame":
                         params = message["params"]
                         frame_number = params["frame_number"]
-                        frame_data = base64.b64decode(params["data"])
+
+                        # 提取 MCP Image Content（避免把 Base64 当文本处理）
+                        frame_data = None
+                        for item in params.get("content", []):
+                            if item.get("type") == "image":
+                                frame_data = base64.b64decode(item["data"])
+                                break
+
+                        if frame_data is None:
+                            logger.error("No image content in frame notification")
+                            continue
 
                         frame_count += 1
 
