@@ -558,6 +558,10 @@ async def handle_tools_list() -> Dict:
                         "window_name": {
                             "type": "string",
                             "description": "窗口名称"
+                        },
+                        "monitor_index": {
+                            "type": "integer",
+                            "description": "显示器索引（None = 主显示器）"
                         }
                     }
                 }
@@ -596,7 +600,13 @@ async def handle_tool_call(params: Dict) -> Dict:
         if isinstance(window_name, str) and not window_name.strip():
             window_name = None
 
-        await capture_engine.start_capture(window_name=window_name, fps=1)
+        monitor_index = arguments.get("monitor_index")
+
+        await capture_engine.start_capture(
+            window_name=window_name,
+            monitor_index=monitor_index,
+            fps=1,
+        )
         await asyncio.sleep(0.5)
         frame = await capture_engine.get_frame()
         await capture_engine.stop_capture()
