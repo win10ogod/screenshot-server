@@ -34,8 +34,17 @@ try:
     print("\nCreating WindowsCapture...")
     capture = WindowsCapture()
 
+    # 使用装饰器注册回调（正确的 API 用法）
+    @capture.event
+    def on_frame_arrived(frame: Frame, control: InternalCaptureControl):
+        on_frame(frame, control)
+
+    @capture.event
+    def on_closed():
+        print("\nCapture session closed")
+
     print("Starting capture (will capture 3 frames)...")
-    capture.start(on_frame)
+    capture.start()  # start() 不接受参数
 
     print(f"\nCaptured {frame_count} frames successfully")
 

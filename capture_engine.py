@@ -270,12 +270,21 @@ class GameCaptureEngine:
 
             self.capture = WindowsCapture(**settings)
 
-            # 在后台线程启动捕获
-            # 使用 lambda 包装以正确传递回调参数
+            # 使用装饰器模式注册回调函数（windows-capture API 要求）
+            @self.capture.event
+            def on_frame_arrived(frame: Frame, control: InternalCaptureControl):
+                self._on_frame_arrived(frame, control)
+
+            @self.capture.event
+            def on_closed():
+                logger.info("Capture session closed")
+                self.status = CaptureStatus.STOPPED
+
+            # 在后台线程启动捕获（start() 不接受参数）
             loop = asyncio.get_event_loop()
             loop.run_in_executor(
                 self.executor,
-                lambda: self.capture.start(self._on_frame_arrived)
+                self.capture.start
             )
 
             self.status = CaptureStatus.RUNNING
