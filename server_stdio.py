@@ -47,8 +47,12 @@ async def capture_single_frame(window_name: str = None) -> ImageContent:
     捕获单帧游戏画面
 
     Args:
-        window_name: 窗口名称（如 "Elden Ring"），留空则捕获整个屏幕
+        window_name: 窗口名称，留空则捕获整个屏幕
     """
+    # Treat empty or whitespace-only input as None to allow full-screen capture
+    if isinstance(window_name, str) and not window_name.strip():
+        window_name = None
+
     logger.info(f"Capturing frame: window={window_name}")
 
     try:

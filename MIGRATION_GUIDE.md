@@ -159,13 +159,13 @@ await client.capture_single_frame()
 ```python
 from client_example import MCPStreamingClient
 
-client = MCPStreamingClient()
-await client.stream_game(
-    window_name="Elden Ring",
-    fps=60,
-    quality=85,
-    duration=60  # 60 秒
-)
+    client = MCPStreamingClient()
+    await client.stream_game(
+        window_name="<窗口名称>",
+        fps=60,
+        quality=85,
+        duration=60  # 60 秒
+    )
 ```
 
 ---
@@ -228,7 +228,7 @@ await client.stream_game(window_name="Game", fps=60)
 ### 2. 窗口级捕获
 ```python
 # 只捕获特定窗口，无需全屏
-await client.capture_single_frame(window_name="Elden Ring")
+await client.capture_single_frame(window_name="<窗口名称>")
 ```
 
 ### 3. 性能监控

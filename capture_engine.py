@@ -193,7 +193,7 @@ class GameCaptureEngine:
         开始捕获
 
         Args:
-            window_name: 窗口名称 (如 "Elden Ring")
+            window_name: 窗口名称
             monitor_index: 显示器索引 (None = 主显示器)
             fps: 目标帧率
             quality: JPEG 质量 (1-100)
