@@ -60,15 +60,22 @@ class MCPStreamingClient:
     async def capture_single_frame(
         self,
         window_name: Optional[str] = None,
+        monitor_index: Optional[int] = None,
         save_path: Optional[str] = None
     ):
         """捕获单帧并可选保存"""
-        logger.info(f"Capturing single frame from window: {window_name or 'screen'}")
-
-        response = await self.call_tool(
-            "capture_single_frame",
-            {"window_name": window_name} if window_name else {}
+        logger.info(
+            f"Capturing single frame from window: {window_name or 'screen'}, "
+            f"monitor: {monitor_index if monitor_index is not None else 'primary'}"
         )
+
+        payload = {}
+        if window_name:
+            payload["window_name"] = window_name
+        if monitor_index is not None:
+            payload["monitor_index"] = monitor_index
+
+        response = await self.call_tool("capture_single_frame", payload)
 
         result = response.get("result", {})
         content = result.get("content", [])

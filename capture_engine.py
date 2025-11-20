@@ -126,6 +126,9 @@ class GameCaptureEngine:
         self.stream_controller: Optional[StreamController] = None
         self.capture: Optional[WindowsCapture] = None
 
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_missing_logged = False
+
         self._frame_number = 0
         self._capture_task: Optional[asyncio.Task] = None
         self._window_name: Optional[str] = None
@@ -138,22 +141,44 @@ class GameCaptureEngine:
     def _on_frame_arrived(self, frame: Frame, control: InternalCaptureControl):
         """帧到达回调 (在捕获线程中调用)"""
         try:
-            # 将帧处理移到异步任务
-            asyncio.create_task(self._process_frame(frame))
+            if self.status != CaptureStatus.RUNNING:
+                return
+
+            if not self._loop or self._loop.is_closed():
+                if not self._loop_missing_logged:
+                    logger.error("Async event loop not available for frame processing")
+                    self._loop_missing_logged = True
+                return
+
+            self._loop_missing_logged = False
+
+            # 将帧处理移到主事件循环中执行
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._process_frame(frame))
+            )
         except Exception as e:
             logger.error(f"Error in frame callback: {e}")
 
     async def _process_frame(self, frame: Frame):
         """处理单个帧"""
         try:
-            # 获取帧数据 (零拷贝)
-            buffer = frame.get_buffer()
-
-            # 转换为 PIL Image
-            # 注意: windows-capture 返回的是 BGRA 格式
             width = frame.width
             height = frame.height
-            img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+
+            # 获取帧数据（兼容不同 windows-capture 版本）
+            if hasattr(frame, "get_buffer"):
+                # 旧版 API
+                buffer = frame.get_buffer()
+                img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+            elif hasattr(frame, "frame_buffer"):
+                # 新版 API 返回 numpy.ndarray（BGRA）
+                np_frame = frame.frame_buffer
+                try:
+                    img = Image.fromarray(np_frame, mode='BGRA')
+                except Exception:
+                    img = Image.frombytes('RGBA', (width, height), np_frame.tobytes(), 'raw', 'BGRA')
+            else:
+                raise AttributeError("Frame does not expose buffer data")
 
             # 转换为 RGB 并压缩为 JPEG
             img_rgb = img.convert('RGB')
@@ -211,6 +236,10 @@ class GameCaptureEngine:
             self._fps = fps or config.capture.default_fps
             self._quality = quality or config.capture.quality
 
+            # 记录当前事件循环，供回调线程使用
+            self._loop = asyncio.get_running_loop()
+            self._loop_missing_logged = False
+
             # 创建流控制器
             self.stream_controller = StreamController(target_fps=self._fps)
 
@@ -225,6 +254,10 @@ class GameCaptureEngine:
                 monitor_index=monitor_index,
                 window_name=window_name
             )
+
+            # 注册回调
+            self.capture.frame_handler = self._on_frame_arrived
+            self.capture.closed_handler = self._on_capture_closed
 
             # 在单独的线程中启动捕获
             self._capture_task = asyncio.create_task(self._run_capture())
@@ -245,12 +278,18 @@ class GameCaptureEngine:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                self.capture.start,
-                self._on_frame_arrived
+                self.capture.start
             )
         except Exception as e:
             logger.error(f"Capture loop error: {e}")
             self.status = CaptureStatus.ERROR
+
+    def _on_capture_closed(self):
+        """捕获会话结束回调"""
+        logger.info("Capture closed")
+        self.status = CaptureStatus.STOPPED
+        self._loop = None
+        self._loop_missing_logged = False
 
     async def stop_capture(self):
         """停止捕获"""
@@ -272,6 +311,7 @@ class GameCaptureEngine:
                         pass
 
                 self.capture = None
+                # 留待关闭回调清理事件循环引用，避免回调线程记录缺失错误
 
             await self.frame_buffer.clear()
             logger.info("Capture stopped")
