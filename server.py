@@ -592,6 +592,10 @@ async def handle_tool_call(params: Dict) -> Dict:
 
     elif tool_name == "capture_single_frame":
         window_name = arguments.get("window_name")
+        # Treat empty or whitespace-only values as None to allow full-screen capture
+        if isinstance(window_name, str) and not window_name.strip():
+            window_name = None
+
         await capture_engine.start_capture(window_name=window_name, fps=1)
         await asyncio.sleep(0.5)
         frame = await capture_engine.get_frame()

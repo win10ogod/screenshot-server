@@ -348,6 +348,16 @@ python -c "import windows_capture; print('OK')"
 netsh advfirewall firewall add rule name="MCP Game Streaming" dir=in action=allow protocol=TCP localport=8000
 ```
 
+### 问题: 针对不存在的窗口出现提示幻觉（例如 Elden Ring）
+
+**原因**: MCP 客户端或系统提示模板写死了示例窗口名，当实际不存在对应窗口或标题不匹配时，模型会返回“未找到窗口”或建议尝试替代方案的幻觉式回复。
+
+**解决**:
+1. **先列出可用窗口**：调用 `list_capturable_windows` 工具获取真实标题，再将该标题传入 `start_game_stream` 或 `capture_single_frame`。
+2. **避免硬编码标题**：在提示或调用参数中让用户填写窗口名，而不是固定 "Elden Ring" 等示例值。
+3. **优化提示模板**：明确要求“仅在窗口存在时启动捕获；未找到时返回窗口列表或请求用户重试”，避免模型自行推断。
+4. **使用进程名兜底**：若窗口标题可能变化，可在客户端先检测相关进程（如 `eldenring.exe`），再将匹配到的窗口标题传给服务器。
+
 ---
 
 ## 📚 相关文档
