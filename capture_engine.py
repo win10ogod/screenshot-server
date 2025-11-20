@@ -162,14 +162,23 @@ class GameCaptureEngine:
     async def _process_frame(self, frame: Frame):
         """处理单个帧"""
         try:
-            # 获取帧数据 (零拷贝)
-            buffer = frame.get_buffer()
-
-            # 转换为 PIL Image
-            # 注意: windows-capture 返回的是 BGRA 格式
             width = frame.width
             height = frame.height
-            img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+
+            # 获取帧数据（兼容不同 windows-capture 版本）
+            if hasattr(frame, "get_buffer"):
+                # 旧版 API
+                buffer = frame.get_buffer()
+                img = Image.frombytes('RGBA', (width, height), buffer, 'raw', 'BGRA')
+            elif hasattr(frame, "frame_buffer"):
+                # 新版 API 返回 numpy.ndarray（BGRA）
+                np_frame = frame.frame_buffer
+                try:
+                    img = Image.fromarray(np_frame, mode='BGRA')
+                except Exception:
+                    img = Image.frombytes('RGBA', (width, height), np_frame.tobytes(), 'raw', 'BGRA')
+            else:
+                raise AttributeError("Frame does not expose buffer data")
 
             # 转换为 RGB 并压缩为 JPEG
             img_rgb = img.convert('RGB')
