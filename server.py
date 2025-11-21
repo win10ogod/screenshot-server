@@ -628,7 +628,7 @@ async def handle_tool_call(params: Dict) -> Dict:
             if frame:
                 # 使用 MCP 原生 image 类型
                 frame_b64 = base64.b64encode(frame.data).decode('utf-8')
-                return {
+                result = {
                     "content": [
                         {
                             "type": "image",
@@ -637,6 +637,9 @@ async def handle_tool_call(params: Dict) -> Dict:
                         }
                     ]
                 }
+                # 记录返回数据的元信息（不记录完整 base64 以避免日志过大）
+                logger.info(f"Returning image: size={len(frame.data)} bytes, base64_length={len(frame_b64)}, dimensions={frame.width}x{frame.height}")
+                return result
             else:
                 return {
                     "content": [

@@ -54,15 +54,27 @@ async def capture_single_frame(window_name: str = None) -> ImageContent:
     try:
         if WINDOWS_CAPTURE_AVAILABLE and capture_engine:
             # 使用高性能 DXGI 捕获
-            await capture_engine.start_capture(window_name=window_name, fps=1)
-            await asyncio.sleep(0.5)  # 等待捕获
-            frame = await capture_engine.get_frame()
+            success = await capture_engine.start_capture(window_name=window_name, fps=1)
+            if not success:
+                raise RuntimeError(f"Failed to start capture for window: {window_name or 'screen'}")
+
+            # 重试获取帧，最多尝试 3 秒（每次等待 0.1 秒）
+            frame = None
+            max_retries = 30
+            for attempt in range(max_retries):
+                await asyncio.sleep(0.1)
+                frame = await capture_engine.get_frame()
+                if frame:
+                    break
+
+            # 停止捕获
             await capture_engine.stop_capture()
 
             if frame:
+                logger.info(f"Returning image: size={len(frame.data)} bytes, dimensions={frame.width}x{frame.height}")
                 return Image(data=frame.data, format="jpeg").to_image_content()
             else:
-                raise RuntimeError("Failed to capture frame with DXGI")
+                raise RuntimeError(f"Timeout: No frame captured after {max_retries * 0.1}s")
 
         elif HAS_PYAUTOGUI:
             # 降级到 pyautogui
